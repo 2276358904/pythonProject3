@@ -1,7 +1,12 @@
+import os.path
+
 import tensorflow as tf
 
+from datetime import datetime
 from datasets import load_dataset
 from transformers import BertTokenizerFast, DataCollatorForLanguageModeling
+from modeling import FasterBERTForMaskedLM
+from model_config import ModelConfig
 
 
 def load_raw_dataset(path=None, name=None):
@@ -53,10 +58,38 @@ class CustomizedSchedule(tf.keras.optimizers.schedules.LearningRateSchedule):
         return arg3 * tf.math.minimum(arg1, arg2)
 
 
-def train(model):
-    learning_rate = CustomizedSchedule(128)  # 模型越大，lr调整越小，不宜采用过高的lr
-    optimizer = tf.optimizers.Adam(learning_rate=learning_rate, beta_1=0.9, beta_2=0.98, epsilon=1e-9)
+def train(train_dataset, val_dataset):
+    if not os.path.exists("model"):
+        os.mkdir("model")
+    model_path = "model" + "/checkpoint-{epoch}-{val_loss:.2f}" + datetime.now().strftime("%Y%m%d-%H%M%S")
+    checkpoint_callback = tf.keras.callbacks.ModelCheckpoint(
+        filepath=model_path,
+        monitor="val_loss",
+        save_best_only=True,
+        save_freq="epoch"
+    )
+    log_dir = "logs/fit/" + datetime.now().strftime("%Y%m%d-%H%M%S")
+    tensorboard_callback = tf.keras.callbacks.TensorBoard(log_dir=log_dir)
+    callbacks = [checkpoint_callback, tensorboard_callback]
+
+    model = get_restored_model()
+    model.fit(train_dataset, epochs=10, callbacks=callbacks, validation_data=val_dataset)
+
+
+def get_compiled_model():
+    config = ModelConfig()
+    model = FasterBERTForMaskedLM(config)
+    schedule_lr = CustomizedSchedule(128)
+    optimizer = tf.optimizers.Adam(learning_rate=schedule_lr)
     model.compile(optimizer=optimizer)
+
+
+def get_restored_model():
+    checkpoints = ["model/" + checkpoint_name for checkpoint_name in os.listdir("model")]
+    if checkpoints:
+        latest_checkpoint = max(checkpoints, key=os.path.getctime)
+        return tf.keras.models.load_model(latest_checkpoint)
+    return get_compiled_model()
 
 
 if __name__ == "__main__":
