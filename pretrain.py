@@ -12,7 +12,7 @@ from model_config import ModelConfig
 def load_raw_dataset(path=None, name=None):
     if path is None:
         return None
-    dataset = load_dataset(path=path, name=name)
+    dataset = load_dataset(path=path, name=name, split="train[:10%]")
     return dataset
 
 
@@ -36,13 +36,19 @@ def convert_to_tf_dataset(dataset, tokenizer, data_collator):
         batch_size=1000,
         num_proc=4
     )
-    tf_dataset = preprocessed_dataset.to_tf_dataset(
+    tf_train_dataset = preprocessed_dataset["train"].to_tf_dataset(
         batch_size=64,
         columns=["input_ids", "attention_mask", "token_type_ids", "labels"],
         shuffle=True,
         collate_fn=data_collator
     )
-    return tf_dataset
+    tf_val_dataset = preprocessed_dataset["validation"].to_tf_dataset(
+        batch_size=64,
+        columns=["input_ids", "attention_mask", "token_type_ids", "labels"],
+        shuffle=False,
+        collate_fn=data_collator
+    )
+    return tf_train_dataset, tf_val_dataset
 
 
 class CustomizedSchedule(tf.keras.optimizers.schedules.LearningRateSchedule):
@@ -93,9 +99,8 @@ def get_restored_model():
 
 
 if __name__ == "__main__":
-    ds = load_raw_dataset(name="wikitext", path="wikitext-103-v1")
+    ds = load_raw_dataset(path="wikitext", name="wikitext-103-v1")
     t = BertTokenizerFast.from_pretrained("bert-base-uncased")
     dc = DataCollatorForLanguageModeling(t, return_tensors="tf")
-    ds = convert_to_tf_dataset(ds, t, dc)
-    for ds in ds.take(10):
-        print(ds)
+    tds, vds = convert_to_tf_dataset(ds, t, dc)
+    train(tds, vds)
