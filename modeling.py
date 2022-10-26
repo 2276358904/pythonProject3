@@ -5,6 +5,8 @@ import tensorflow as tf
 from scipy import linalg
 from functools import partial
 
+from transformers import shape_list
+
 from data_adapter import unpack_data
 from model_utils import (
     get_initializer,
@@ -248,11 +250,11 @@ class FasterBERTSelfAttention(tf.keras.layers.Layer):
             # sin_pos [batch_size, num_heads, seq_len, hidden_size // 2]
             sin_pos = tf.stack([sin, sin], axis=-1)
             # [batch_size, num_heads, seq_len, hidden_size // 2, 2] -> [batch_size, num_heads, seq_len, hidden_size]
-            sin_pos = tf.reshape(sin_pos, position_embeddings.shape)
+            sin_pos = tf.reshape(sin_pos, tf.shape(position_embeddings))
             # cos [θ0,θ1,θ2......θd/2-1] -> cos_pos [θ0,θ0,θ1,θ1,θ2,θ2......θd/2-1,θd/2-1]
             # cos_pos [batch_size, num_heads, seq_len, hidden_size // 2]
             cos_pos = tf.stack([cos, cos], axis=-1)
-            cos_pos = tf.reshape(cos_pos, position_embeddings.shape)
+            cos_pos = tf.reshape(cos_pos, tf.shape(position_embeddings))
 
             # assume q,k,v is a token vector, and qi is an element is this token vector
             # q [q0,q1,q2,q3......qd-2,qd-1] -> [-q1,q0,-q3,q2......-qd-1,qd-2]
@@ -260,19 +262,19 @@ class FasterBERTSelfAttention(tf.keras.layers.Layer):
             query_layer1 = tf.stack([-query_layer[:, :, :, 1::2], query_layer[:, :, :, ::2]], axis=-1)
             # query_layer1
             # [batch_size, num_heads, seq_len, hidden_size // 2, 2] -> [batch_size, num_heads, seq_len, hidden_size]
-            query_layer1 = tf.reshape(query_layer1, query_layer.shape)
+            query_layer1 = tf.reshape(query_layer1, tf.shape(query_layer))
             # query layer with position information.
             query_layer = query_layer * cos_pos + query_layer1 * sin_pos
 
             # key_layer1
             key_layer1 = tf.stack([-key_layer[:, :, :, 1::2], key_layer[:, :, :, ::2]], axis=-1)
-            key_layer1 = tf.reshape(key_layer1, key_layer.shape)
+            key_layer1 = tf.reshape(key_layer1, tf.shape(key_layer))
             key_layer = key_layer * cos_pos + key_layer1 * sin_pos
 
             if value_layer is not None:
                 # value_layer1
                 value_layer1 = tf.stack([-value_layer[:, :, :, 1::2], value_layer[:, :, :, ::2]], axis=-1)
-                value_layer1 = tf.reshape(value_layer1, value_layer.shape)
+                value_layer1 = tf.reshape(value_layer1, tf.shape(value_layer))
                 value_layer = value_layer * cos_pos + value_layer1 * sin_pos
 
         attention_scores = tf.matmul(query_layer, key_layer, transpose_b=True)
@@ -289,7 +291,7 @@ class FasterBERTSelfAttention(tf.keras.layers.Layer):
 
         attention_outputs = tf.matmul(attention_probs, value_layer)
         attention_outputs = tf.transpose(attention_outputs, perm=[0, 2, 1, 3])
-        attention_outputs = tf.reshape(attention_outputs, (batch_size, seq_len, -1))
+        attention_outputs = tf.reshape(attention_outputs, (batch_size, seq_len, self.all_head_size))
 
         outputs = (attention_outputs, attention_probs) if output_attentions else (attention_outputs,)
         return outputs
@@ -301,8 +303,8 @@ class FasterBERTAttentionOutput(tf.keras.layers.Layer):
 
         self.dense = tf.keras.layers.Dense(
             config.hidden_size,
-            name="dense",
-            kernel_initializer=get_initializer(config.initializer_range)
+            kernel_initializer=get_initializer(config.initializer_range),
+            name="dense"
         )
         self.dropout = tf.keras.layers.Dropout(rate=config.dropout_rate, name="dropout")
         self.layer_norm = tf.keras.layers.LayerNormalization(epsilon=config.layer_norm_epsilon, name="layer_norm")
@@ -420,6 +422,7 @@ class FasterBERTEncoder(tf.keras.layers.Layer):
         super().__init__(**kwargs)
 
         self.num_heads = config.num_heads
+        self.head_size = int(config.hidden_size / config.num_heads)
         self.num_hidden_layers = config.num_hidden_layers
         self.num_hidden_groups = config.num_hidden_groups
 
@@ -446,11 +449,12 @@ class FasterBERTEncoder(tf.keras.layers.Layer):
         # actually, embed_size << hidden_size.
         hidden_states = self.dense(hidden_states)
 
-        batch_size, seq_len = hidden_states.shape[0], hidden_states.shape[1]
+        hidden_states_shape = shape_list(hidden_states)
+        batch_size, seq_len = hidden_states_shape[0], hidden_states_shape[1]
         position_embeddings = self.position_embeddings[None, :seq_len, :]
         position_embeddings = tf.tile(position_embeddings, (batch_size, 1, 1))
         # [batch_size, seq_len, hidden_size] -> [batch_size, num_heads, seq_len, head_size]
-        position_embeddings = tf.reshape(position_embeddings, (batch_size, seq_len, self.num_heads, -1))
+        position_embeddings = tf.reshape(position_embeddings, (batch_size, seq_len, self.num_heads, self.head_size))
         position_embeddings = tf.transpose(position_embeddings, perm=[0, 2, 1, 3])
 
         all_hidden_states = ()
@@ -499,13 +503,13 @@ class FasterBERTMainLayer(tf.keras.layers.Layer):
         if input_ids is not None and input_embeds is not None:
             raise ValueError("You cannot specify both input_ids and inputs_embeds at the same time")
         elif input_ids is not None:
-            input_shape = tf.shape(input_ids)
+            input_shape = shape_list(input_ids)
         elif input_embeds is not None:
-            input_shape = tf.shape(input_embeds)[:-1]
+            input_shape = shape_list(input_embeds)[:-1]
         else:
             raise ValueError("You have to specify either input_ids or input_embeds")
 
-        batch_size, seq_len = input_shape[0], input_shape[1]
+        batch_size, seq_len = input_shape
 
         if attention_mask is None:
             attention_mask = tf.ones((batch_size, seq_len), tf.float32)
@@ -513,8 +517,9 @@ class FasterBERTMainLayer(tf.keras.layers.Layer):
             attention_mask = tf.cast(attention_mask, tf.float32)
 
         # make the mask broadcast to [batch_size, num_heads, mask_seq_len, mask_seq_len].
+        attention_mask_shape = shape_list(attention_mask)
         extended_attention_mask = tf.reshape(
-            attention_mask, (attention_mask.shape[0], 1, 1, attention_mask.shape[1])
+            attention_mask, (attention_mask_shape[0], 1, 1, attention_mask_shape[1])
         )
 
         embedding_outputs = self.embedding(input_ids, token_type_ids, input_embeds, training)
@@ -523,7 +528,7 @@ class FasterBERTMainLayer(tf.keras.layers.Layer):
         # masked positions, this operation will create a tensor which is 0.0 for
         # positions.
         one_cst = tf.constant(1.0, dtype=embedding_outputs.dtype)
-        extend_attention_mask = tf.subtract(one_cst, extended_attention_mask, embedding_outputs.dtype)
+        extend_attention_mask = tf.subtract(one_cst, extended_attention_mask)
 
         outputs = self.encoder(
             embedding_outputs,
@@ -565,7 +570,7 @@ class FasterBERTModel(tf.keras.Model):
 
 
 class FasterBERTMLMHead(tf.keras.layers.Layer):
-    def __init__(self, config, embeddings, **kwargs):
+    def __init__(self, config, embeddings: tf.keras.layers.Layer, **kwargs):
         super().__init__(**kwargs)
 
         self.vocab_size = config.vocab_size
@@ -596,7 +601,7 @@ class FasterBERTMLMHead(tf.keras.layers.Layer):
 
         seq_len = hidden_states.shape[1]
         hidden_states = tf.reshape(hidden_states, (-1, self.embed_size))
-        hidden_states = tf.matmul(hidden_states, self.embeddings.weight, transpose_b=True)
+        hidden_states = tf.matmul(hidden_states, self.embeddings.weights[0], transpose_b=True)
         hidden_states = tf.reshape(hidden_states, (-1, seq_len, self.vocab_size))
         hidden_states = tf.nn.bias_add(hidden_states, bias=self.bias)
         return hidden_states
@@ -676,11 +681,8 @@ class FasterBERTForMaskedLM(tf.keras.Model):
             **kwargs
         )
 
-    @tf.function
+    @tf.function(jit_compile=True)
     def train_step(self, data):
-        input_names = ["input_ids", "attention_mask", "token_type_ids",
-                       "input_embeds", "output_attentions", "output_hidden_states",
-                       "labels", "training"]
         inputs = data
         y = inputs["labels"]
         with tf.GradientTape() as tape:
@@ -691,14 +693,9 @@ class FasterBERTForMaskedLM(tf.keras.Model):
                 labels=y,
                 training=True
             )
-
             # y_pred[0] loss
-            loss = self.compiled_loss(
-                y_true=y_pred[0],
-                y_pred=y_pred[0],
-                regularization_losses=self.losses
-            )
+            loss = y_pred[0]
 
         self.optimizer.minimize(loss, self.trainable_variables, tape=tape)
-        self.compiled_metrics.update_state(y, y_pred[1])
+        self.compiled_metrics.update_state(y, y_pred[1], sample_weight=None)
         return {m.name: m.result() for m in self.metrics}

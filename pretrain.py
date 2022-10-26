@@ -17,7 +17,7 @@ def load_raw_dataset(path=None, name=None):
 
 
 def preprocess_function(data):
-    block_size = 1000
+    block_size = 256
     concatenated_data = {k: sum(v, []) for k, v in data.items()}
     length = len(concatenated_data[list(data.keys())[0]])
     length = length // block_size * block_size
