@@ -12,7 +12,7 @@ from model_config import ModelConfig
 def load_raw_dataset(path=None, name=None):
     if path is None:
         return None
-    dataset = load_dataset(path=path, name=name, split="train[:10%]")
+    dataset = load_dataset(path=path, name=name, split="train[:10000]")
     return dataset
 
 
@@ -28,21 +28,24 @@ def preprocess_function(data):
     return result
 
 
-def convert_to_tf_dataset(dataset, tokenizer, data_collator):
-    tokenized_dataset = dataset.map(lambda data: tokenizer(dataset["text"]), remove_columns=["text"])
+def convert_to_tf_dataset(dataset, tokenizer:BertTokenizerFast, data_collator):
+    tokenized_dataset = dataset.map(
+        lambda data: tokenizer(dataset["text"]),
+        batched=True,
+        remove_columns=["text"])
     preprocessed_dataset = tokenized_dataset.map(
         preprocess_function,
         batched=True,
         batch_size=1000,
         num_proc=4
     )
-    tf_train_dataset = preprocessed_dataset["train"].to_tf_dataset(
+    tf_train_dataset = preprocessed_dataset.to_tf_dataset(
         batch_size=64,
         columns=["input_ids", "attention_mask", "token_type_ids", "labels"],
         shuffle=True,
         collate_fn=data_collator
     )
-    tf_val_dataset = preprocessed_dataset["validation"].to_tf_dataset(
+    tf_val_dataset = preprocessed_dataset.to_tf_dataset(
         batch_size=64,
         columns=["input_ids", "attention_mask", "token_type_ids", "labels"],
         shuffle=False,
@@ -78,24 +81,12 @@ def train(train_dataset, val_dataset):
     tensorboard_callback = tf.keras.callbacks.TensorBoard(log_dir=log_dir)
     callbacks = [checkpoint_callback, tensorboard_callback]
 
-    model = get_restored_model()
-    model.fit(train_dataset, epochs=10, callbacks=callbacks, validation_data=val_dataset)
-
-
-def get_compiled_model():
     config = ModelConfig()
     model = FasterBERTForMaskedLM(config)
     schedule_lr = CustomizedSchedule(128)
     optimizer = tf.optimizers.Adam(learning_rate=schedule_lr)
     model.compile(optimizer=optimizer)
-
-
-def get_restored_model():
-    checkpoints = ["model/" + checkpoint_name for checkpoint_name in os.listdir("model")]
-    if checkpoints:
-        latest_checkpoint = max(checkpoints, key=os.path.getctime)
-        return tf.keras.models.load_model(latest_checkpoint)
-    return get_compiled_model()
+    model.fit(train_dataset, epochs=10, callbacks=callbacks, validation_data=val_dataset)
 
 
 if __name__ == "__main__":

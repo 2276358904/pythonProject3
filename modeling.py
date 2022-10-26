@@ -505,7 +505,7 @@ class FasterBERTMainLayer(tf.keras.layers.Layer):
         else:
             raise ValueError("You have to specify either input_ids or input_embeds")
 
-        batch_size, seq_len = input_shape
+        batch_size, seq_len = input_shape[0], input_shape[1]
 
         if attention_mask is None:
             attention_mask = tf.ones((batch_size, seq_len), tf.float32)
@@ -676,20 +676,19 @@ class FasterBERTForMaskedLM(tf.keras.Model):
             **kwargs
         )
 
+    @tf.function
     def train_step(self, data):
         input_names = ["input_ids", "attention_mask", "token_type_ids",
                        "input_embeds", "output_attentions", "output_hidden_states",
                        "labels", "training"]
-        x, y, sample_weight = unpack_data(data)
-        inputs = {key: val for key, val in x.items() if key in input_names}
-
+        inputs = data
+        y = inputs["labels"]
         with tf.GradientTape() as tape:
             y_pred = self(
                 input_ids=inputs["input_ids"],
                 attention_mask=inputs["attention_mask"],
                 token_type_ids=inputs["token_type_ids"],
-                input_embeds=inputs["input_embeds"],
-                labels=inputs["labels"],
+                labels=y,
                 training=True
             )
 
@@ -697,10 +696,9 @@ class FasterBERTForMaskedLM(tf.keras.Model):
             loss = self.compiled_loss(
                 y_true=y_pred[0],
                 y_pred=y_pred[0],
-                sample_weight=sample_weight,
                 regularization_losses=self.losses
             )
 
         self.optimizer.minimize(loss, self.trainable_variables, tape=tape)
-        self.compiled_metrics.update_state(y, y_pred[1], sample_weight)
+        self.compiled_metrics.update_state(y, y_pred[1])
         return {m.name: m.result() for m in self.metrics}
